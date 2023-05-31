@@ -1,0 +1,218 @@
+---
+title: "Minimum Viable Bean Analysis"
+author: "Julio Avelar-Barragan"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries and input files.  
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(Maaslin2)
+library(RColorBrewer)
+library(nlme)
+library(Hmisc)
+
+options(scipen=999)
+
+setwd("/media/julio/Storage/BEANS/")
+
+metadata = read.csv("bean_metadata.csv") %>% unite(col = "Fiber2", Fiber, Fraction, sep = "_", remove = F)
+
+OTU_table = read.delim("Bracken_L7_table.txt", check.names = F, row.names = 1) %>%
+  select(contains("num")) %>%
+  rename_with(~gsub("_species.bracken_num", "", .x)) %>%
+  select(metadata$SampleID) %>%
+  filter(rowSums(.) != 0)
+
+OTU_table = OTU_table[!rownames(OTU_table) == "Homo sapiens",]
+  
+Read_counts = read.delim("Bean_readcounts.tsv", check.names = F, header = T)
+```
+
+Read counts.  
+```{r}
+RC_plot_df = reshape2::melt(Read_counts)
+
+grp.means = RC_plot_df %>% group_by(variable) %>% summarise(means = mean(value))
+grp.means$sd = RC_plot_df %>% group_by(variable) %>% summarise(sd = sd(value))
+
+ggplot(data = RC_plot_df) +
+  aes(x = value, fill = variable) + 
+  geom_vline(data=grp.means, aes(xintercept=means, color=variable), linetype="dashed") +
+  geom_histogram(position = "identity", alpha = 0.5, color = "black") + 
+  theme_bw() +
+  labs(title = "Read counts/Sample", x = NULL, y = "Count", fill = "QC Step") + 
+  guides(color = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Seems like a significant proportion of reads were lost from filtering out human, mouse, and rat derived reads.  
+
+Kraken unknowns.  
+```{r kraken_unknowns}
+kraken_unknowns = read.csv("/media/julio/Storage/BEANS/kraken_report_merged_unknown.txt", sep="") %>% 
+  right_join(metadata) %>%
+  filter(!Fiber == "CTRL")
+
+kraken_unknowns$Fiber = factor(kraken_unknowns$Fiber, levels = c("NONE", "BLACK", "PINTO"))
+
+ggplot(data = kraken_unknowns) +
+  aes(x = Fiber, y = Unknown, fill = Fraction) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = .1)) +
+  #facet_grid(.~Time, scales = "free", space = "free") +
+  theme_bw() +
+  labs(x = NULL, title = "Reads not mapping to kraken2 DB", y = "% of unmapped reads")
+  #scale_fill_manual(values = c("#BF0D3E", "steelblue")) +
+  #theme(strip.background = element_rect(fill="white"))
+```
+The amount of unknowns is similar to the pure fiber culturing analysis.  
+
+'Rarefaction' Curve.  
+```{r rarefaction_curve}
+rarecurve(t(OTU_table), sample = 100000, step = 10000, label = F, xlab = "Read Depth", col = "orange", xlim=c(0, 200000))
+
+#Looks like a good idea to toss samples which had less than 100k mapped reads.  
+OTU_clean = OTU_table[,!colSums(OTU_table) < 100000]
+```
+
+Alpha diversity.  
+```{r Alpha}
+alpha_df = as.data.frame(diversity(x = OTU_clean, MARGIN = 2)) %>% merge(., y = metadata, by.x = "row.names", by.y = "SampleID") %>% rename(Shannon = `diversity(x = OTU_clean, MARGIN = 2)`)
+
+alpha_df = alpha_df %>% filter(!Fiber == "CTRL")
+alpha_df$Fiber = factor(alpha_df$Fiber, levels = c("NONE", "BLACK", "PINTO"))
+
+ggplot(data = alpha_df) +
+  aes(x = Fiber, y = Shannon, fill = Fraction) +
+  geom_boxplot(outlier.shape = NA) +
+  #facet_grid(.~Time, scales = "free", space = "free") +
+  geom_point(position = position_jitterdodge(jitter.width = .1), alpha = 0.5) +
+  #scale_fill_manual(values = c("#BF0D3E", "steelblue")) +
+  #geom_text(label = alpha_df$Row.names, position = position_jitterdodge(jitter.width = .1)) +
+  theme_bw() +
+  theme(strip.background = element_rect(fill="white")) +
+  labs(x = NULL, y = "Shannon Index", title = "Taxonomic diversity")
+```
+
+No difference between bean or solubility types in shannon diversity.  
+
+Beta diversity.  
+```{r beta, include=FALSE}
+T24_nmds = metaMDS(t(OTU_clean), trymax = 1024, parallel = 32, k = 2, )
+T24_points = T24_nmds$points %>% 
+  merge(., metadata, by.x = "row.names", by.y = "SampleID") %>% filter(!Fiber == "CTRL")
+T24_points$Fiber = factor(T24_points$Fiber, levels = c("NONE", "BLACK", "PINTO"))
+```
+
+```{r}
+ggplot(data = T24_points) +
+  aes(x = MDS1, y = MDS2) +
+  #stat_ellipse(aes(mapping = Fiber2, color = Fiber2), alpha = 0.5, lty = 2) +
+  geom_point(aes(fill = Fraction, pch = Fiber), color = "black", size = 5, alpha = 0.5) +
+  geom_text(aes(label = Subject), color = "black", size = 2.5, alpha = 0.7) +
+  scale_shape_manual(values = c(21,23, 24)) +
+  #scale_fill_manual(values = c("#BF0D3E", "steelblue")) +
+  #scale_color_manual(values = c("#BF0D3E", "steelblue")) +
+  guides(color = "none", fill = guide_legend(override.aes = list(shape = 21))) +
+  theme_bw() +
+  #theme(legend.position = "none") +
+  #labs(title = "Time point 0h") +
+  annotate("text", x = Inf, y = Inf, label = bquote("Stress ="~.(round(T24_nmds$stress, digits = 2))), hjust = 1, vjust = 1)
+  #annotate("text", x = .5, y = .275, label = "k = 2", hjust = 1)
+```
+
+Permanova.  
+```{r permanova}
+OTU_clean_merged = as.data.frame(t(OTU_clean)) %>%
+  rownames_to_column(var = "SampleID") %>%
+  left_join(metadata) %>%
+  filter(!Fiber == "CTRL" & !Fraction == "NONE") %>%
+  column_to_rownames(var = "SampleID")
+
+adonis2(formula = select(OTU_clean_merged, !Fiber2:Subject) ~ Subject + Fiber + Fraction, data = OTU_clean_merged, permutations = 999, method = "bray", parallel = 32)
+```
+
+Run maaslin2 for differential abundance.  
+Only ran it for the soluble/insoluble fraction because that indicated significant differences by permanova.  
+
+```{r eval=FALSE, include=FALSE}
+maaslin_OTU = select(OTU_clean_merged, !Fiber2:Subject) %>% decostand(., method = "total", MARGIN =1) %>% t(.)
+
+Maaslin2(input_data = as.data.frame(maaslin_OTU), input_metadata = select(OTU_clean_merged, Fiber2:Subject), output = "Fraction_maaslin", min_prevalence = .2, min_abundance = 0.001, normalization = "TSS", transform = "LOG", analysis_method = "LM", fixed_effects = "Fraction", max_significance = 0.05, plot_heatmap = T, plot_scatter = T, random_effects = "Subject", cores = 4)
+```
+
+Volcano plot of dabs features.  
+```{r}
+maas_res = read.delim("Fraction_maaslin/all_results.tsv", check.names = F)
+
+maas_res = maas_res %>% mutate(color = case_when(
+  qval < 0.05 & coef > 0 ~ "color1",
+  qval < 0.05 & coef < 0 ~ "color2",
+  qval > 0.05 ~ "color3"
+))
+
+ggplot(data = maas_res) +
+  aes(x = coef, y = -log10(qval), color = color) +
+  geom_hline(yintercept = -log10(0.05), lty = 2) +
+  geom_vline(xintercept = 0, lty = 3) +
+  geom_point(alpha = 0.5, size = 2) + 
+  scale_color_manual(values = c("steelblue", "#BF0D3E", "gray"), labels = c("Increased", "Decreased", "N.S.")) +
+  labs(title = "Significantly different microbes by fraction", subtitle = "T24 only", x = "MaAsLin coefficient", y = expression("-log"[10]*"(q-value)"), color = "Abundance in \nSoluble Fraction") +
+  theme_bw() +
+  ggrepel::geom_text_repel(aes(x = coef, y = -log10(qval), label = feature), color = "black", size = 2, max.overlaps = 8) +
+  annotate("text", x = -1.5, y = 10.5, size = 2.5, hjust = 0, label = bquote("Total:"~.(sum(maas_res$qval < 0.05)))) +
+  annotate("text", x = -1.5, y = 11.5, size = 2.5, hjust = 0, label = bquote("Positive:"~.(sum(maas_res$qval < 0.05 & maas_res$coef > 0)))) +
+  annotate("text", x = -1.5, y = 11, size = 2.5, hjust = 0, label = bquote("Negative:"~.(sum(maas_res$qval < 0.05 & maas_res$coef < 0))))
+```
+
+Taxa bar plot at the family level.  
+```{r fig.width=10}
+family_OTU_table = read.delim("/media/julio/Storage/BEANS/Bracken_L5_table.txt", check.names = F, row.names = 1) %>%
+  select(contains("frac")) %>%
+  rename_with(~gsub("_family.bracken_frac", "", .x)) %>%
+  select(alpha_df$Row.names) %>%
+  filter(rowSums(.) != 0) %>%
+  #select(!contains("NEG") & ) %>%
+  rownames_to_column(var = "L5")
+
+top_10 = family_OTU_table %>%
+  rowwise(L5) %>% 
+  summarise(mean = mean(c_across(`I_BK-F01-1`:`S_PN-F16-3`))) %>% 
+  ungroup %>% 
+  slice_max(mean, n = 10)
+
+#Melt and separate taxonomy, remove whitespaces
+barplot_df = family_OTU_table %>% 
+  pivot_longer(!L5) %>%
+  mutate(L5 = if_else(L5 %in% top_10$L5, L5, "Other")) %>%
+  group_by(L5, name) %>%
+  summarise(value = sum(value)) %>%
+  mutate(x = "Family") %>% 
+  left_join(metadata, by = join_by("name" == "SampleID"))
+
+barplot_df = rbind(barplot_df[!(barplot_df$L5 == "Other"),],barplot_df[(barplot_df$L5 == "Other"),]) #Move other to bottom
+barplot_df$L5 <- factor(barplot_df$L5, levels = unique(barplot_df$L5)) #Fix the order
+barplot_df$Fiber <- factor(barplot_df$Fiber, levels = c("NONE", "BLACK", "PINTO"))
+barplot_df$Fraction <- factor(barplot_df$Fraction, levels = c("NONE", "SOLUBLE", "INSOLUBLE"))
+
+Julio_color = c("#003f5c", "#665191", "#d45087", "#ff7c43","#ffa600", "#7F0A57", "#CD9ABB", "#39A9AB", "#71CFC5", "#007947" ,"gray")
+
+ggplot(data = barplot_df) +
+  aes(x = name, weight = value, fill = L5) +
+  geom_bar() +
+  theme_classic() +
+  facet_grid(.~Subject, scales = "free", space = "free") +
+  labs(x = NULL, y = "Relative abundance", fill = "Family") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_fill_manual(values = Julio_color)
+```
